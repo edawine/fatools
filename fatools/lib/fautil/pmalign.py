@@ -13,23 +13,67 @@ from fatools.lib.fautil.alignutils import (estimate_z, pair_f, align_dp,
 from fatools.lib.fautil.gmalign import ZFunc, align_gm
 from fatools.lib import const
 
-ANCHOR_RTIME_LOWER_BOUND = 1400
-ANCHOR_RTIME_UPPER_BOUND = 5000
-PEAK_RTIME_UPPER_BOUND = 11000
+
+def get_percentile_range(rtimes, start, end):
+    percentile_range = []
+    for rtime in rtimes:
+        if np.percentile(rtimes, q=start) <= rtime <= np.percentile(rtimes, q=end):
+            percentile_range.append(rtime)
+
+    return np.mean(percentile_range)
+
+
+def determine_ratio_from_signature(signature):
+    # LIZ500 (15-40%, 80-100%): [100, 139, 150, 160], [400, 450, 490, 500]
+    # LIZ600 (10-50%, 80-100%): [120, 140, 160, 180, 200, 214, 220, 240, 250],
+    #                           [480, 500, 514, 520, 540, 560, 580, 600]
+    ladder_type = {'LIZ500': (-0.19287374128582493 + 0.25, 0.34934159566227729 + 0.28),
+                   'LIZ600': (-0.17270136176501633, 0.3593370632323446 + 0.2)}
+    # signature for LIZ500
+    if 139 in signature:
+        lower_bound, upper_bound = ladder_type['LIZ500']
+    # signature for LIZ600
+    elif 214 in signature:
+        lower_bound, upper_bound = ladder_type['LIZ600']
+    else:
+        cerr('E: Unknown ladder size!')
+
+    return lower_bound, upper_bound
+
+
+def percentile_rtime_bounds(peaks, ladder):
+    rtimes = [peak.rtime for peak in peaks]
+    ladder_signature = ladder['signature']
+    if 139 in ladder_signature:
+        mean_start = get_percentile_range(rtimes, 15, 40)
+    elif 214 in ladder_signature:
+        mean_start = get_percentile_range(rtimes, 10, 50)
+    mean_end = get_percentile_range(rtimes, 80, 100)
+    delta_percentile = mean_end - mean_start
+    lower_bound, upper_bound = determine_ratio_from_signature(ladder_signature)
+
+    anchor_start = lower_bound * delta_percentile + mean_start
+    anchor_end = upper_bound * delta_percentile + mean_start
+    cerr('d percentile: {}, start: {}, end: {}'.format(
+        delta_percentile, anchor_start, anchor_end))
+    return anchor_start, anchor_end
+
+
+def check_anchor_candidates(anchor_peaks, peaks, ladder):
+    signature = ladder['signature']
+    while len(anchor_peaks) <= len(signature):
+        rtime_threshold = min([peak.rtime for peak in anchor_peaks])
+        backup_peaks = [peak for peak in peaks if peak.rtime < rtime_threshold]
+        anchor_peaks.append(backup_peaks[-1])
+
+    return sorted(anchor_peaks, key=lambda peak: peak.rtime)
 
 
 def align_pm(peaks, ladder, anchor_pairs=None):
-
     if not anchor_pairs:
-        longest_rtime_peak = max([p.rtime for p in peaks])
-        if longest_rtime_peak > PEAK_RTIME_UPPER_BOUND:
-            bound_adjust_ratio = longest_rtime_peak / PEAK_RTIME_UPPER_BOUND
-            anchor_start = ANCHOR_RTIME_LOWER_BOUND * bound_adjust_ratio
-            anchor_end = ANCHOR_RTIME_UPPER_BOUND * bound_adjust_ratio
-        else:
-            anchor_start = ANCHOR_RTIME_LOWER_BOUND
-            anchor_end = ANCHOR_RTIME_UPPER_BOUND
+        anchor_start, anchor_end = percentile_rtime_bounds(peaks, ladder)
         anchor_peaks = [ p for p in peaks if anchor_start < p.rtime < anchor_end ]
+        anchor_peaks = check_anchor_candidates(anchor_peaks, peaks, ladder)
         anchor_pairs, initial_z = estimate_pm( anchor_peaks, ladder['signature'] )
 
     else:
